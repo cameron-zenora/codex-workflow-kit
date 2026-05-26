@@ -327,6 +327,18 @@ codex_review_issue() {
   fi
 }
 
+codex_fix_findings() {
+  local file="$1"
+  local id review
+  id="$(issue_field "$file" id)"
+  review="$(review_path "$id")"
+  echo "Fixing review findings for $file from $review"
+  if ! codex --ask-for-approval never exec -C "$ROOT" --sandbox "$SANDBOX" "Use implement-issue-tdd. Fix only the blocking findings in $review for $file. Read the issue, review note, linked PRD, and relevant code first. Do not expand scope beyond the review findings. Run the issue test plan and relevant checks. Keep the issue in review, update issue notes with checks run, and stop after this issue."; then
+    echo "Codex fix failed while fixing $file" >&2
+    exit 1
+  fi
+}
+
 case "$subcommand" in
   help|-h|--help)
     cat <<HELP
@@ -339,6 +351,7 @@ aiwf commands:
   aiwf afk
   aiwf afk --through-review
   aiwf afk --review-between --through-review
+  aiwf afk --review-between --fix-findings --through-review
 HELP
     ;;
   init)
@@ -380,11 +393,14 @@ HELP
   afk)
     completed=0
     review_between=0
+    fix_findings=0
     for arg in "$@"; do
       if [ "$arg" = "--through-review" ]; then
         ALLOW_REVIEW_BLOCKERS=1
       elif [ "$arg" = "--review-between" ]; then
         review_between=1
+      elif [ "$arg" = "--fix-findings" ]; then
+        fix_findings=1
       fi
     done
     echo "Using Codex sandbox: $SANDBOX"
@@ -394,6 +410,9 @@ HELP
     if [ "$review_between" -eq 1 ]; then
       echo "Running fresh review-work between AFK implementation steps."
     fi
+    if [ "$fix_findings" -eq 1 ]; then
+      echo "Fixing blocking review findings automatically until review passes or Codex fails."
+    fi
     while true; do
       if [ "$review_between" -eq 1 ]; then
         review_issue="$(next_review_issue || true)"
@@ -401,6 +420,10 @@ HELP
           review_id="$(issue_field "$review_issue" id)"
           codex_review_issue "$review_issue"
           if ! review_passed "$review_id"; then
+            if [ "$fix_findings" -eq 1 ]; then
+              codex_fix_findings "$review_issue"
+              continue
+            fi
             echo "Review for $review_id found blocking findings or did not write blocking_findings: 0; stopping for fixes." >&2
             exit 1
           fi
@@ -431,6 +454,10 @@ HELP
         issue_id="$(issue_field "$next" id)"
         codex_review_issue "$next"
         if ! review_passed "$issue_id"; then
+          if [ "$fix_findings" -eq 1 ]; then
+            codex_fix_findings "$next"
+            continue
+          fi
           echo "Review for $issue_id found blocking findings or did not write blocking_findings: 0; stopping for fixes." >&2
           exit 1
         fi

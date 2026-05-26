@@ -128,3 +128,9 @@ aiwf afk --review-between --through-review
 ```
 
 That mode writes fresh-context review notes under `reviews/` and only chains through `review` blockers when the review note reports `blocking_findings: 0`.
+
+For an all-night run that also fixes blocking review findings, use:
+
+```powershell
+aiwf afk --review-between --fix-findings --through-review
+```

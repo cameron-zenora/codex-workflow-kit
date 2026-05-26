@@ -121,6 +121,14 @@ This runs implementation and review in separate fresh Codex contexts. Review not
 
 Use this when you plan to do final human QA later. It still skips issues whose own status is `done`, and it still stops at `HITL` issues or blocking review findings.
 
+To let it keep working all night, including fixing blocking review findings, run:
+
+```powershell
+aiwf afk --review-between --fix-findings --through-review
+```
+
+That mode cycles `implement -> review -> fix review findings -> review` until reviews pass, Codex fails, no AFK work remains, or a HITL issue is next.
+
 ## 6. Resolve HITL Issues
 
 When an issue is `HITL`, do not let the agent guess.

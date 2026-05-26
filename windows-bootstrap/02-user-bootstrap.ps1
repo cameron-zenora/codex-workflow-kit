@@ -222,6 +222,19 @@ function Invoke-CodexReview($Root, $IssuePath, $Sandbox) {
   }
 }
 
+function Invoke-CodexFixFindings($Root, $IssuePath, $Sandbox) {
+  $id = Get-IssueField $IssuePath "id"
+  $rel = Resolve-Path -Relative $IssuePath
+  $reviewPath = Get-ReviewPath $Root $id
+  $reviewRel = Resolve-Path -Relative $reviewPath
+
+  Write-Host "Fixing review findings for $rel from $reviewRel" -ForegroundColor Cyan
+  codex --ask-for-approval never exec -C $Root --sandbox $Sandbox "Use implement-issue-tdd. Fix only the blocking findings in $reviewRel for $rel. Read the issue, review note, linked PRD, and relevant code first. Do not expand scope beyond the review findings. Run the issue test plan and relevant checks. Keep the issue in review, update issue notes with checks run, and stop after this issue."
+  if ($LASTEXITCODE -ne 0) {
+    throw "Codex fix exited with code $LASTEXITCODE while fixing $rel"
+  }
+}
+
 $root = Get-Root
 $issuesDir = if ($env:CODEX_FLOW_ISSUES_DIR) { $env:CODEX_FLOW_ISSUES_DIR } else { Join-Path $root "issues" }
 $sandbox = if ($env:CODEX_FLOW_SANDBOX) { $env:CODEX_FLOW_SANDBOX } else { "danger-full-access" }
@@ -237,6 +250,7 @@ aiwf.ps1 commands:
   aiwf.ps1 afk
   aiwf.ps1 afk --through-review
   aiwf.ps1 afk --review-between --through-review
+  aiwf.ps1 afk --review-between --fix-findings --through-review
   aiwf.ps1 implement ISSUE-001
   aiwf.ps1 review ISSUE-001
   aiwf.ps1 hitl ISSUE-003
@@ -267,12 +281,16 @@ aiwf.ps1 commands:
     $completed = 0
     $allowReviewBlockers = $Rest -contains "--through-review"
     $reviewBetween = $Rest -contains "--review-between"
+    $fixFindings = $Rest -contains "--fix-findings"
     Write-Host "Using Codex sandbox: $sandbox" -ForegroundColor Yellow
     if ($allowReviewBlockers) {
       Write-Host "Treating review blockers with passing review notes as complete for AFK implementation chaining." -ForegroundColor Yellow
     }
     if ($reviewBetween) {
       Write-Host "Running fresh review-work between AFK implementation steps." -ForegroundColor Yellow
+    }
+    if ($fixFindings) {
+      Write-Host "Fixing blocking review findings automatically until review passes or Codex fails." -ForegroundColor Yellow
     }
     while ($true) {
       if ($reviewBetween) {
@@ -281,6 +299,10 @@ aiwf.ps1 commands:
           $reviewId = Get-IssueField $reviewIssue.FullName "id"
           Invoke-CodexReview $root $reviewIssue.FullName $sandbox
           if (-not (Test-ReviewPassed $root $reviewId)) {
+            if ($fixFindings) {
+              Invoke-CodexFixFindings $root $reviewIssue.FullName $sandbox
+              continue
+            }
             throw "Review for $reviewId found blocking findings or did not write blocking_findings: 0; stopping for fixes."
           }
           continue
@@ -310,6 +332,10 @@ aiwf.ps1 commands:
         $issueId = Get-IssueField $next.FullName "id"
         Invoke-CodexReview $root $next.FullName $sandbox
         if (-not (Test-ReviewPassed $root $issueId)) {
+          if ($fixFindings) {
+            Invoke-CodexFixFindings $root $next.FullName $sandbox
+            continue
+          }
           throw "Review for $issueId found blocking findings or did not write blocking_findings: 0; stopping for fixes."
         }
       }
