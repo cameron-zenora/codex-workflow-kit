@@ -134,3 +134,12 @@ For an all-night run that also fixes blocking review findings, use:
 ```powershell
 aiwf afk --review-between --fix-findings --through-review
 ```
+
+Each spawned `codex exec` has a timeout guard so a finished-but-stuck child process cannot hold the overnight loop forever. The default is 5400 seconds. Override it per shell when needed:
+
+```powershell
+$env:CODEX_FLOW_EXEC_TIMEOUT_SECONDS = "7200"
+aiwf afk --review-between --fix-findings --through-review
+```
+
+Set `CODEX_FLOW_EXEC_TIMEOUT_SECONDS=0` to disable the guard.

@@ -207,6 +207,68 @@ function Get-NextReviewIssue($Root, $IssuesDir, [bool]$AllowReviewBlockers = $fa
   } | Select-Object -First 1
 }
 
+function ConvertTo-PowerShellLiteral($Value) {
+  return "'" + ([string]$Value -replace "'", "''") + "'"
+}
+
+function Get-CodexExecTimeoutSeconds {
+  if ($env:CODEX_FLOW_EXEC_TIMEOUT_SECONDS) {
+    $value = [int]$env:CODEX_FLOW_EXEC_TIMEOUT_SECONDS
+    if ($value -lt 0) { throw "CODEX_FLOW_EXEC_TIMEOUT_SECONDS must be 0 or greater." }
+    return $value
+  }
+  return 5400
+}
+
+function Stop-ProcessTree($ProcessId) {
+  Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $ProcessId } | ForEach-Object {
+    Stop-ProcessTree $_.ProcessId
+  }
+  Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+function Invoke-CodexExec {
+  param(
+    [string]$Root,
+    [string[]]$Arguments,
+    [string]$Label
+  )
+
+  $timeoutSeconds = Get-CodexExecTimeoutSeconds
+  $rootLiteral = ConvertTo-PowerShellLiteral $Root
+  $argumentLiteralList = ($Arguments | ForEach-Object { ConvertTo-PowerShellLiteral $_ }) -join ", "
+  $script = @"
+`$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath $rootLiteral
+`$codexArgs = @($argumentLiteralList)
+& codex @codexArgs
+exit `$LASTEXITCODE
+"@
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+  $pwsh = (Get-Command pwsh -ErrorAction Stop).Source
+  $process = Start-Process -FilePath $pwsh -ArgumentList @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encoded) -NoNewWindow -PassThru
+
+  if ($timeoutSeconds -gt 0) {
+    $finished = $process.WaitForExit([int]($timeoutSeconds * 1000))
+  } else {
+    $process.WaitForExit()
+    $finished = $true
+  }
+
+  if (-not $finished) {
+    Write-Warning "Codex timed out after $timeoutSeconds second(s) while $Label. Stopping that process tree and refreshing the board."
+    Stop-ProcessTree $process.Id
+    return $false
+  }
+
+  $process.Refresh()
+  if ($process.ExitCode -ne 0) {
+    throw "Codex exited with code $($process.ExitCode) while $Label"
+  }
+
+  return $true
+}
+
 function Invoke-CodexReview($Root, $IssuePath, $Sandbox) {
   New-Item -ItemType Directory -Path (Join-Path $Root "reviews") -Force | Out-Null
   $id = Get-IssueField $IssuePath "id"
@@ -216,10 +278,8 @@ function Invoke-CodexReview($Root, $IssuePath, $Sandbox) {
   $reviewRel = Join-Path $reviewRel (Split-Path -Leaf $reviewPath)
 
   Write-Host "Reviewing $rel -> $reviewRel" -ForegroundColor Cyan
-  codex --ask-for-approval never exec -C $Root --sandbox $Sandbox "Use review-work. Review the current uncommitted changes against $rel in a fresh context. Do not modify implementation files or issue files. You may only create or replace the review note at $reviewRel. Write the review note with YAML-style metadata at the top containing issue: $id, result: pass or needs-fix, and blocking_findings: the count of P0/P1/P2 findings. Use blocking_findings: 0 only when there are no P0/P1/P2 findings. Findings first, ordered by severity. Include tests run or not run. Do not paste the full diff."
-  if ($LASTEXITCODE -ne 0) {
-    throw "Codex review exited with code $LASTEXITCODE while reviewing $rel"
-  }
+  $prompt = "Use review-work. Review the current uncommitted changes against $rel in a fresh context. $shellGuidance Do not modify implementation files or issue files. You may only create or replace the review note at $reviewRel. Write the review note with YAML-style metadata at the top containing issue: $id, result: pass or needs-fix, and blocking_findings: the count of P0/P1/P2 findings. Use blocking_findings: 0 only when there are no P0/P1/P2 findings. Findings first, ordered by severity. Include tests run or not run. Do not paste the full diff."
+  return (Invoke-CodexExec -Root $Root -Arguments @("--ask-for-approval", "never", "exec", "-C", $Root, "--sandbox", $Sandbox, $prompt) -Label "reviewing $rel")
 }
 
 function Invoke-CodexFixFindings($Root, $IssuePath, $Sandbox) {
@@ -229,15 +289,14 @@ function Invoke-CodexFixFindings($Root, $IssuePath, $Sandbox) {
   $reviewRel = Resolve-Path -Relative $reviewPath
 
   Write-Host "Fixing review findings for $rel from $reviewRel" -ForegroundColor Cyan
-  codex --ask-for-approval never exec -C $Root --sandbox $Sandbox "Use implement-issue-tdd. Fix only the blocking findings in $reviewRel for $rel. Read the issue, review note, linked PRD, and relevant code first. Do not expand scope beyond the review findings. Run the issue test plan and relevant checks. Keep the issue in review, update issue notes with checks run, and stop after this issue."
-  if ($LASTEXITCODE -ne 0) {
-    throw "Codex fix exited with code $LASTEXITCODE while fixing $rel"
-  }
+  $prompt = "Use implement-issue-tdd. Fix only the blocking findings in $reviewRel for $rel. $shellGuidance Read the issue, review note, linked PRD, and relevant code first. Do not expand scope beyond the review findings. Run the issue test plan and relevant checks. Keep the issue in review, update issue notes with checks run, and stop after this issue."
+  return (Invoke-CodexExec -Root $Root -Arguments @("--ask-for-approval", "never", "exec", "-C", $Root, "--sandbox", $Sandbox, $prompt) -Label "fixing review findings for $rel")
 }
 
 $root = Get-Root
 $issuesDir = if ($env:CODEX_FLOW_ISSUES_DIR) { $env:CODEX_FLOW_ISSUES_DIR } else { Join-Path $root "issues" }
 $sandbox = if ($env:CODEX_FLOW_SANDBOX) { $env:CODEX_FLOW_SANDBOX } else { "danger-full-access" }
+$shellGuidance = "Use PowerShell-safe shell commands. When using rg on Windows, do not pass wildcard path arguments like imports\server\*.js; search directories and use --glob/-g instead, for example: rg -n -g '*.js' 'pattern' imports/server. Do not leave dev servers, watch commands, or long-running smoke servers in the foreground; if you start one, stop it before returning."
 
 switch ($Command) {
   "help" {
@@ -254,6 +313,9 @@ aiwf.ps1 commands:
   aiwf.ps1 implement ISSUE-001
   aiwf.ps1 review ISSUE-001
   aiwf.ps1 hitl ISSUE-003
+
+Env:
+  CODEX_FLOW_EXEC_TIMEOUT_SECONDS=5400 by default; set 0 to disable.
 "@
   }
   "init" {
@@ -292,15 +354,22 @@ aiwf.ps1 commands:
     if ($fixFindings) {
       Write-Host "Fixing blocking review findings automatically until review passes or Codex fails." -ForegroundColor Yellow
     }
+    $execTimeoutSeconds = Get-CodexExecTimeoutSeconds
+    if ($execTimeoutSeconds -gt 0) {
+      Write-Host "Codex exec timeout: $execTimeoutSeconds second(s)." -ForegroundColor Yellow
+    } else {
+      Write-Host "Codex exec timeout disabled." -ForegroundColor Yellow
+    }
     while ($true) {
       if ($reviewBetween) {
         $reviewIssue = Get-NextReviewIssue $root $issuesDir $allowReviewBlockers
         if ($reviewIssue) {
           $reviewId = Get-IssueField $reviewIssue.FullName "id"
-          Invoke-CodexReview $root $reviewIssue.FullName $sandbox
+          $reviewReturned = Invoke-CodexReview $root $reviewIssue.FullName $sandbox
+          if (-not $reviewReturned) { continue }
           if (-not (Test-ReviewPassed $root $reviewId)) {
             if ($fixFindings) {
-              Invoke-CodexFixFindings $root $reviewIssue.FullName $sandbox
+              $null = Invoke-CodexFixFindings $root $reviewIssue.FullName $sandbox
               continue
             }
             throw "Review for $reviewId found blocking findings or did not write blocking_findings: 0; stopping for fixes."
@@ -318,22 +387,24 @@ aiwf.ps1 commands:
 
       $rel = Resolve-Path -Relative $next.FullName
       Write-Host "AFK selecting $rel" -ForegroundColor Cyan
-      codex --ask-for-approval never exec -C $root --sandbox $sandbox "Use run-afk-loop. Implement exactly this selected unblocked AFK issue: $rel. Within this issue, use implement-issue-tdd. Read the linked PRD, blockers, acceptance criteria, affected modules, and test plan. Use TDD where practical. Run the issue test plan and relevant checks. Update the issue status and notes when complete. Do not implement review, done, blocked, or HITL issues. Do not ask for confirmation between AFK issues. Stop this invocation after this issue so aiwf afk can refresh the board."
-      if ($LASTEXITCODE -ne 0) {
-        throw "Codex exited with code $LASTEXITCODE while working on $rel"
-      }
+      $prompt = "Use run-afk-loop. Implement exactly this selected unblocked AFK issue: $rel. Within this issue, use implement-issue-tdd. $shellGuidance Read the linked PRD, blockers, acceptance criteria, affected modules, and test plan. Use TDD where practical. Run the issue test plan and relevant checks. Update the issue status and notes when complete. Do not implement review, done, blocked, or HITL issues. Do not ask for confirmation between AFK issues. Stop this invocation after this issue so aiwf afk can refresh the board."
+      $implementationReturned = Invoke-CodexExec -Root $root -Arguments @("--ask-for-approval", "never", "exec", "-C", $root, "--sandbox", $sandbox, $prompt) -Label "working on $rel"
 
       $statusAfter = Get-IssueField $next.FullName "status"
+      if (-not $implementationReturned -and $statusAfter -eq "todo" -and (Test-Unblocked $issuesDir $next.FullName $allowReviewBlockers)) {
+        throw "Codex timed out while working on $rel, and the issue is still todo and unblocked; stopping to avoid repeating it."
+      }
       if ($statusAfter -eq "todo" -and (Test-Unblocked $issuesDir $next.FullName $allowReviewBlockers)) {
         throw "Issue $rel is still todo and unblocked after Codex returned; stopping to avoid repeating it."
       }
 
       if ($reviewBetween -and $statusAfter -eq "review") {
         $issueId = Get-IssueField $next.FullName "id"
-        Invoke-CodexReview $root $next.FullName $sandbox
+        $reviewReturned = Invoke-CodexReview $root $next.FullName $sandbox
+        if (-not $reviewReturned) { continue }
         if (-not (Test-ReviewPassed $root $issueId)) {
           if ($fixFindings) {
-            Invoke-CodexFixFindings $root $next.FullName $sandbox
+            $null = Invoke-CodexFixFindings $root $next.FullName $sandbox
             continue
           }
           throw "Review for $issueId found blocking findings or did not write blocking_findings: 0; stopping for fixes."
@@ -346,16 +417,21 @@ aiwf.ps1 commands:
   "implement" {
     $issue = Resolve-Issue $root $issuesDir $Rest[0]
     $rel = Resolve-Path -Relative $issue
-    codex --ask-for-approval never exec -C $root --sandbox $sandbox "Use implement-issue-tdd on $rel. Implement only this issue. Read the linked PRD, blockers, and relevant code first. Use TDD where practical. Run the issue test plan and relevant checks. Do not expand into other issues."
+    $prompt = "Use implement-issue-tdd on $rel. Implement only this issue. $shellGuidance Read the linked PRD, blockers, and relevant code first. Use TDD where practical. Run the issue test plan and relevant checks. Do not expand into other issues."
+    if (-not (Invoke-CodexExec -Root $root -Arguments @("--ask-for-approval", "never", "exec", "-C", $root, "--sandbox", $sandbox, $prompt) -Label "implementing $rel")) {
+      throw "Codex timed out while implementing $rel"
+    }
   }
   "review" {
     $issue = Resolve-Issue $root $issuesDir $Rest[0]
-    Invoke-CodexReview $root $issue $sandbox
+    if (-not (Invoke-CodexReview $root $issue $sandbox)) {
+      throw "Codex timed out while reviewing $issue"
+    }
   }
   "hitl" {
     $issue = Resolve-Issue $root $issuesDir $Rest[0]
     $rel = Resolve-Path -Relative $issue
-    codex -C $root --sandbox $sandbox "Resolve this HITL issue: $rel. Ask decisions one at a time with recommended defaults. Do not edit app code. Once I approve, update the issue decision table and set status to done."
+    codex -C $root --sandbox $sandbox "Resolve this HITL issue: $rel. $shellGuidance Ask decisions one at a time with recommended defaults. Do not edit app code. Once I approve, update the issue decision table and set status to done."
   }
   default { throw "Unknown command: $Command" }
 }

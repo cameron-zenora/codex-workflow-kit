@@ -212,6 +212,42 @@ ROOT="$(find_root)"
 ISSUES_DIR="${CODEX_FLOW_ISSUES_DIR:-$ROOT/issues}"
 SANDBOX="${CODEX_FLOW_SANDBOX:-workspace-write}"
 ALLOW_REVIEW_BLOCKERS=0
+SHELL_GUIDANCE="Do not leave dev servers, watch commands, or long-running smoke servers in the foreground; if you start one, stop it before returning."
+
+codex_exec() {
+  local timeout_seconds="${CODEX_FLOW_EXEC_TIMEOUT_SECONDS:-5400}"
+  if [ "$timeout_seconds" = "0" ]; then
+    codex "$@"
+    return $?
+  fi
+
+  python3 - "$timeout_seconds" codex "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+timeout = int(sys.argv[1])
+command = sys.argv[2:]
+process = subprocess.Popen(command, start_new_session=True)
+try:
+    sys.exit(process.wait(timeout=timeout))
+except subprocess.TimeoutExpired:
+    print(
+        f"Codex timed out after {timeout} second(s); stopping that process group and refreshing the board.",
+        file=sys.stderr,
+    )
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=10)
+    except Exception:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except Exception:
+            pass
+    sys.exit(124)
+PY
+}
 
 issue_field() {
   local file="$1"
@@ -321,7 +357,15 @@ codex_review_issue() {
   id="$(issue_field "$file" id)"
   review="$(review_path "$id")"
   echo "Reviewing $file -> $review"
-  if ! codex --ask-for-approval never exec -C "$ROOT" --sandbox "$SANDBOX" "Use review-work. Review the current uncommitted changes against $file in a fresh context. Do not modify implementation files or issue files. You may only create or replace the review note at $review. Write the review note with YAML-style metadata at the top containing issue: $id, result: pass or needs-fix, and blocking_findings: the count of P0/P1/P2 findings. Use blocking_findings: 0 only when there are no P0/P1/P2 findings. Findings first, ordered by severity. Include tests run or not run. Do not paste the full diff."; then
+  if codex_exec --ask-for-approval never exec -C "$ROOT" --sandbox "$SANDBOX" "Use review-work. Review the current uncommitted changes against $file in a fresh context. $SHELL_GUIDANCE Do not modify implementation files or issue files. You may only create or replace the review note at $review. Write the review note with YAML-style metadata at the top containing issue: $id, result: pass or needs-fix, and blocking_findings: the count of P0/P1/P2 findings. Use blocking_findings: 0 only when there are no P0/P1/P2 findings. Findings first, ordered by severity. Include tests run or not run. Do not paste the full diff."; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 124 ]; then
+    return 124
+  fi
+  if [ "$status" -ne 0 ]; then
     echo "Codex review failed while reviewing $file" >&2
     exit 1
   fi
@@ -333,7 +377,15 @@ codex_fix_findings() {
   id="$(issue_field "$file" id)"
   review="$(review_path "$id")"
   echo "Fixing review findings for $file from $review"
-  if ! codex --ask-for-approval never exec -C "$ROOT" --sandbox "$SANDBOX" "Use implement-issue-tdd. Fix only the blocking findings in $review for $file. Read the issue, review note, linked PRD, and relevant code first. Do not expand scope beyond the review findings. Run the issue test plan and relevant checks. Keep the issue in review, update issue notes with checks run, and stop after this issue."; then
+  if codex_exec --ask-for-approval never exec -C "$ROOT" --sandbox "$SANDBOX" "Use implement-issue-tdd. Fix only the blocking findings in $review for $file. $SHELL_GUIDANCE Read the issue, review note, linked PRD, and relevant code first. Do not expand scope beyond the review findings. Run the issue test plan and relevant checks. Keep the issue in review, update issue notes with checks run, and stop after this issue."; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 124 ]; then
+    return 124
+  fi
+  if [ "$status" -ne 0 ]; then
     echo "Codex fix failed while fixing $file" >&2
     exit 1
   fi
@@ -352,6 +404,9 @@ aiwf commands:
   aiwf afk --through-review
   aiwf afk --review-between --through-review
   aiwf afk --review-between --fix-findings --through-review
+
+Env:
+  CODEX_FLOW_EXEC_TIMEOUT_SECONDS=5400 by default; set 0 to disable.
 HELP
     ;;
   init)
@@ -413,15 +468,35 @@ HELP
     if [ "$fix_findings" -eq 1 ]; then
       echo "Fixing blocking review findings automatically until review passes or Codex fails."
     fi
+    if [ "${CODEX_FLOW_EXEC_TIMEOUT_SECONDS:-5400}" = "0" ]; then
+      echo "Codex exec timeout disabled."
+    else
+      echo "Codex exec timeout: ${CODEX_FLOW_EXEC_TIMEOUT_SECONDS:-5400} second(s)."
+    fi
     while true; do
       if [ "$review_between" -eq 1 ]; then
         review_issue="$(next_review_issue || true)"
         if [ -n "$review_issue" ]; then
           review_id="$(issue_field "$review_issue" id)"
-          codex_review_issue "$review_issue"
+          if codex_review_issue "$review_issue"; then
+            review_status=0
+          else
+            review_status=$?
+          fi
+          if [ "$review_status" -eq 124 ]; then
+            continue
+          fi
           if ! review_passed "$review_id"; then
             if [ "$fix_findings" -eq 1 ]; then
-              codex_fix_findings "$review_issue"
+              if codex_fix_findings "$review_issue"; then
+                fix_status=0
+              else
+                fix_status=$?
+              fi
+              if [ "$fix_status" -ne 0 ] && [ "$fix_status" -ne 124 ]; then
+                echo "Codex fix failed while fixing $review_issue" >&2
+                exit 1
+              fi
               continue
             fi
             echo "Review for $review_id found blocking findings or did not write blocking_findings: 0; stopping for fixes." >&2
@@ -439,12 +514,21 @@ HELP
       fi
 
       echo "AFK selecting $next"
-      if ! codex --ask-for-approval never exec -C "$ROOT" --sandbox "$SANDBOX" "Use run-afk-loop. Implement exactly this selected unblocked AFK issue: $next. Within this issue, use implement-issue-tdd. Read the linked PRD, blockers, acceptance criteria, affected modules, and test plan. Use TDD where practical. Run the issue test plan and relevant checks. Update the issue status and notes when complete. Do not implement review, done, blocked, or HITL issues. Do not ask for confirmation between AFK issues. Stop this invocation after this issue so aiwf afk can refresh the board."; then
+      if codex_exec --ask-for-approval never exec -C "$ROOT" --sandbox "$SANDBOX" "Use run-afk-loop. Implement exactly this selected unblocked AFK issue: $next. Within this issue, use implement-issue-tdd. $SHELL_GUIDANCE Read the linked PRD, blockers, acceptance criteria, affected modules, and test plan. Use TDD where practical. Run the issue test plan and relevant checks. Update the issue status and notes when complete. Do not implement review, done, blocked, or HITL issues. Do not ask for confirmation between AFK issues. Stop this invocation after this issue so aiwf afk can refresh the board."; then
+        implementation_status=0
+      else
+        implementation_status=$?
+      fi
+      if [ "$implementation_status" -ne 0 ] && [ "$implementation_status" -ne 124 ]; then
         echo "Codex failed while working on $next" >&2
         exit 1
       fi
 
       status_after="$(issue_field "$next" status)"
+      if [ "$implementation_status" -eq 124 ] && [ "$status_after" = "todo" ] && issue_unblocked "$next"; then
+        echo "Codex timed out while working on $next, and the issue is still todo and unblocked; stopping to avoid repeating it." >&2
+        exit 1
+      fi
       if [ "$status_after" = "todo" ] && issue_unblocked "$next"; then
         echo "Issue $next is still todo and unblocked after Codex returned; stopping to avoid repeating it." >&2
         exit 1
@@ -452,10 +536,25 @@ HELP
 
       if [ "$review_between" -eq 1 ] && [ "$status_after" = "review" ]; then
         issue_id="$(issue_field "$next" id)"
-        codex_review_issue "$next"
+        if codex_review_issue "$next"; then
+          review_status=0
+        else
+          review_status=$?
+        fi
+        if [ "$review_status" -eq 124 ]; then
+          continue
+        fi
         if ! review_passed "$issue_id"; then
           if [ "$fix_findings" -eq 1 ]; then
-            codex_fix_findings "$next"
+            if codex_fix_findings "$next"; then
+              fix_status=0
+            else
+              fix_status=$?
+            fi
+            if [ "$fix_status" -ne 0 ] && [ "$fix_status" -ne 124 ]; then
+              echo "Codex fix failed while fixing $next" >&2
+              exit 1
+            fi
             continue
           fi
           echo "Review for $issue_id found blocking findings or did not write blocking_findings: 0; stopping for fixes." >&2
