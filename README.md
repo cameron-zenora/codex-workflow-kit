@@ -108,3 +108,21 @@ grill-me
 ```
 
 Use Codex GUI for the real agent work. Use shell scripts for setup and quick state checks.
+
+## Overnight AFK
+
+After issues are prepared and marked `AFK`, run:
+
+```powershell
+aiwf afk
+```
+
+This repeatedly launches Codex on the next unblocked `todo` + `AFK` issue and stops when no AFK work remains, a HITL decision is next, or a run fails.
+
+On Windows, `aiwf` defaults these Codex runs to `danger-full-access` to avoid Windows sandbox launch failures. Set `CODEX_FLOW_SANDBOX` to override that behavior.
+
+For a deeper implementation-only run that treats `review` blockers as complete, use:
+
+```powershell
+aiwf afk --through-review
+```

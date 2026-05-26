@@ -210,6 +210,78 @@ find_root() {
 
 ROOT="$(find_root)"
 ISSUES_DIR="${CODEX_FLOW_ISSUES_DIR:-$ROOT/issues}"
+SANDBOX="${CODEX_FLOW_SANDBOX:-workspace-write}"
+ALLOW_REVIEW_BLOCKERS=0
+
+issue_field() {
+  local file="$1"
+  local field="$2"
+  awk -F': ' -v field="$field" '$0 ~ "^" field ": " { print $2; exit }' "$file"
+}
+
+issue_by_id() {
+  local id="$1"
+  local file
+  for file in "$ISSUES_DIR"/*.md; do
+    [ -e "$file" ] || continue
+    if [ "$(issue_field "$file" id)" = "$id" ]; then
+      echo "$file"
+      return 0
+    fi
+  done
+  return 1
+}
+
+issue_done() {
+  local id="$1"
+  local file
+  file="$(issue_by_id "$id" || true)"
+  [ -n "$file" ] && [ "$(issue_field "$file" status)" = "done" ]
+}
+
+issue_complete_for_blocker() {
+  local id="$1"
+  local file status
+  file="$(issue_by_id "$id" || true)"
+  [ -n "$file" ] || return 1
+  status="$(issue_field "$file" status)"
+  [ "$status" = "done" ] || { [ "$ALLOW_REVIEW_BLOCKERS" -eq 1 ] && [ "$status" = "review" ]; }
+}
+
+issue_unblocked() {
+  local file="$1"
+  local raw blocker
+  raw="$(issue_field "$file" blocked_by)"
+  if [ -z "$raw" ] || [ "$raw" = "[]" ]; then
+    return 0
+  fi
+
+  for blocker in $(printf "%s" "$raw" | sed -E 's/[][]//g; s/,/ /g'); do
+    case "$blocker" in
+      ISSUE-*)
+        if ! issue_complete_for_blocker "$blocker"; then
+          return 1
+        fi
+        ;;
+    esac
+  done
+  return 0
+}
+
+next_afk_issue() {
+  local file
+  [ -d "$ISSUES_DIR" ] || return 1
+  for file in "$ISSUES_DIR"/*.md; do
+    [ -e "$file" ] || continue
+    if [ "$(issue_field "$file" status)" = "todo" ] && \
+       [ "$(issue_field "$file" type)" = "AFK" ] && \
+       issue_unblocked "$file"; then
+      echo "$file"
+      return 0
+    fi
+  done
+  return 1
+}
 
 case "$subcommand" in
   help|-h|--help)
@@ -219,6 +291,9 @@ aiwf commands:
   aiwf root
   aiwf status
   aiwf next
+  aiwf next --through-review
+  aiwf afk
+  aiwf afk --through-review
 HELP
     ;;
   init)
@@ -230,30 +305,66 @@ HELP
     ;;
   status)
     [ -d "$ISSUES_DIR" ] || { echo "No issues directory found at $ISSUES_DIR" >&2; exit 1; }
-    printf "%-10s %-8s %-5s %-18s %s\n" "ID" "STATUS" "TYPE" "BLOCKED_BY" "TITLE"
+    printf "%-10s %-8s %-5s %-9s %-18s %s\n" "ID" "STATUS" "TYPE" "READY" "BLOCKED_BY" "TITLE"
     for file in "$ISSUES_DIR"/*.md; do
       [ -e "$file" ] || continue
-      id="$(awk -F': ' '/^id: / { print $2; exit }' "$file")"
-      status="$(awk -F': ' '/^status: / { print $2; exit }' "$file")"
-      type="$(awk -F': ' '/^type: / { print $2; exit }' "$file")"
-      blocked_by="$(awk -F': ' '/^blocked_by: / { print $2; exit }' "$file")"
-      title="$(awk -F': ' '/^title: / { print $2; exit }' "$file")"
-      printf "%-10s %-8s %-5s %-18s %s\n" "$id" "$status" "$type" "$blocked_by" "$title"
+      id="$(issue_field "$file" id)"
+      status="$(issue_field "$file" status)"
+      type="$(issue_field "$file" type)"
+      blocked_by="$(issue_field "$file" blocked_by)"
+      title="$(issue_field "$file" title)"
+      if [ "$status" = "done" ]; then
+        ready="done"
+      elif issue_unblocked "$file"; then
+        ready="ready"
+      else
+        ready="blocked"
+      fi
+      printf "%-10s %-8s %-5s %-9s %-18s %s\n" "$id" "$status" "$type" "$ready" "$blocked_by" "$title"
     done
     ;;
   next)
-    [ -d "$ISSUES_DIR" ] || { echo "NO_MORE_AFK_TASKS"; exit 0; }
-    for file in "$ISSUES_DIR"/*.md; do
-      [ -e "$file" ] || continue
-      status="$(awk -F': ' '/^status: / { print $2; exit }' "$file")"
-      type="$(awk -F': ' '/^type: / { print $2; exit }' "$file")"
-      blocked_by="$(awk -F': ' '/^blocked_by: / { print $2; exit }' "$file")"
-      if [ "$status" = "todo" ] && [ "$type" = "AFK" ] && { [ -z "$blocked_by" ] || [ "$blocked_by" = "[]" ]; }; then
-        echo "$file"
-        exit 0
+    for arg in "$@"; do
+      if [ "$arg" = "--through-review" ]; then
+        ALLOW_REVIEW_BLOCKERS=1
       fi
     done
-    echo "NO_MORE_AFK_TASKS"
+    next="$(next_afk_issue || true)"
+    if [ -n "$next" ]; then echo "$next"; else echo "NO_MORE_AFK_TASKS"; fi
+    ;;
+  afk)
+    completed=0
+    for arg in "$@"; do
+      if [ "$arg" = "--through-review" ]; then
+        ALLOW_REVIEW_BLOCKERS=1
+      fi
+    done
+    echo "Using Codex sandbox: $SANDBOX"
+    if [ "$ALLOW_REVIEW_BLOCKERS" -eq 1 ]; then
+      echo "Treating review blockers as complete for AFK implementation chaining."
+    fi
+    while true; do
+      next="$(next_afk_issue || true)"
+      if [ -z "$next" ]; then
+        echo "NO_MORE_AFK_TASKS"
+        echo "AFK loop stopped after $completed issue(s)."
+        break
+      fi
+
+      echo "AFK selecting $next"
+      if ! codex --ask-for-approval never exec -C "$ROOT" --sandbox "$SANDBOX" "Use run-afk-loop. Implement exactly this selected unblocked AFK issue: $next. Within this issue, use implement-issue-tdd. Read the linked PRD, blockers, acceptance criteria, affected modules, and test plan. Use TDD where practical. Run the issue test plan and relevant checks. Update the issue status and notes when complete. Do not implement review, done, blocked, or HITL issues. Do not ask for confirmation between AFK issues. Stop this invocation after this issue so aiwf afk can refresh the board."; then
+        echo "Codex failed while working on $next" >&2
+        exit 1
+      fi
+
+      status_after="$(issue_field "$next" status)"
+      if [ "$status_after" = "todo" ] && issue_unblocked "$next"; then
+        echo "Issue $next is still todo and unblocked after Codex returned; stopping to avoid repeating it." >&2
+        exit 1
+      fi
+
+      completed=$((completed + 1))
+    done
     ;;
   *)
     echo "Unknown command: $subcommand" >&2

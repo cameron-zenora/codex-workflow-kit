@@ -164,15 +164,31 @@ function Test-IssueDone($IssuesDir, $Id) {
   return $issue -and (Get-IssueField $issue.FullName "status") -eq "done"
 }
 
-function Test-Unblocked($IssuesDir, $Path) {
+function Test-IssueCompleteForBlocker($IssuesDir, $Id, [bool]$AllowReviewBlockers = $false) {
+  $issue = Get-IssueById $IssuesDir $Id
+  if (-not $issue) { return $false }
+  $status = Get-IssueField $issue.FullName "status"
+  return $status -eq "done" -or ($AllowReviewBlockers -and $status -eq "review")
+}
+
+function Test-Unblocked($IssuesDir, $Path, [bool]$AllowReviewBlockers = $false) {
   foreach ($blocker in Get-Blockers $Path) {
-    if (-not (Test-IssueDone $IssuesDir $blocker)) { return $false }
+    if (-not (Test-IssueCompleteForBlocker $IssuesDir $blocker $AllowReviewBlockers)) { return $false }
   }
   return $true
 }
 
+function Get-NextAfkIssue($IssuesDir, [bool]$AllowReviewBlockers = $false) {
+  Get-ChildItem $IssuesDir -Filter "*.md" -ErrorAction SilentlyContinue | Sort-Object Name | Where-Object {
+    (Get-IssueField $_.FullName "status") -eq "todo" -and
+    (Get-IssueField $_.FullName "type") -eq "AFK" -and
+    (Test-Unblocked $IssuesDir $_.FullName $AllowReviewBlockers)
+  } | Select-Object -First 1
+}
+
 $root = Get-Root
 $issuesDir = if ($env:CODEX_FLOW_ISSUES_DIR) { $env:CODEX_FLOW_ISSUES_DIR } else { Join-Path $root "issues" }
+$sandbox = if ($env:CODEX_FLOW_SANDBOX) { $env:CODEX_FLOW_SANDBOX } else { "danger-full-access" }
 
 switch ($Command) {
   "help" {
@@ -181,6 +197,9 @@ aiwf.ps1 commands:
   aiwf.ps1 init
   aiwf.ps1 status
   aiwf.ps1 next
+  aiwf.ps1 next --through-review
+  aiwf.ps1 afk
+  aiwf.ps1 afk --through-review
   aiwf.ps1 implement ISSUE-001
   aiwf.ps1 review ISSUE-001
   aiwf.ps1 hitl ISSUE-003
@@ -203,27 +222,54 @@ aiwf.ps1 commands:
     }
   }
   "next" {
-    $next = Get-ChildItem $issuesDir -Filter "*.md" | Sort-Object Name | Where-Object {
-      (Get-IssueField $_.FullName "status") -eq "todo" -and
-      (Get-IssueField $_.FullName "type") -eq "AFK" -and
-      (Test-Unblocked $issuesDir $_.FullName)
-    } | Select-Object -First 1
+    $allowReviewBlockers = $Rest -contains "--through-review"
+    $next = Get-NextAfkIssue $issuesDir $allowReviewBlockers
     if ($next) { $next.FullName } else { "NO_MORE_AFK_TASKS" }
+  }
+  "afk" {
+    $completed = 0
+    $allowReviewBlockers = $Rest -contains "--through-review"
+    Write-Host "Using Codex sandbox: $sandbox" -ForegroundColor Yellow
+    if ($allowReviewBlockers) {
+      Write-Host "Treating review blockers as complete for AFK implementation chaining." -ForegroundColor Yellow
+    }
+    while ($true) {
+      $next = Get-NextAfkIssue $issuesDir $allowReviewBlockers
+      if (-not $next) {
+        "NO_MORE_AFK_TASKS"
+        "AFK loop stopped after $completed issue(s)."
+        break
+      }
+
+      $rel = Resolve-Path -Relative $next.FullName
+      Write-Host "AFK selecting $rel" -ForegroundColor Cyan
+      codex --ask-for-approval never exec -C $root --sandbox $sandbox "Use run-afk-loop. Implement exactly this selected unblocked AFK issue: $rel. Within this issue, use implement-issue-tdd. Read the linked PRD, blockers, acceptance criteria, affected modules, and test plan. Use TDD where practical. Run the issue test plan and relevant checks. Update the issue status and notes when complete. Do not implement review, done, blocked, or HITL issues. Do not ask for confirmation between AFK issues. Stop this invocation after this issue so aiwf afk can refresh the board."
+      if ($LASTEXITCODE -ne 0) {
+        throw "Codex exited with code $LASTEXITCODE while working on $rel"
+      }
+
+      $statusAfter = Get-IssueField $next.FullName "status"
+      if ($statusAfter -eq "todo" -and (Test-Unblocked $issuesDir $next.FullName $allowReviewBlockers)) {
+        throw "Issue $rel is still todo and unblocked after Codex returned; stopping to avoid repeating it."
+      }
+
+      $completed += 1
+    }
   }
   "implement" {
     $issue = Resolve-Issue $root $issuesDir $Rest[0]
     $rel = Resolve-Path -Relative $issue
-    codex --ask-for-approval never exec -C $root --sandbox workspace-write "Use implement-issue-tdd on $rel. Implement only this issue. Read the linked PRD, blockers, and relevant code first. Use TDD where practical. Run the issue test plan and relevant checks. Do not expand into other issues."
+    codex --ask-for-approval never exec -C $root --sandbox $sandbox "Use implement-issue-tdd on $rel. Implement only this issue. Read the linked PRD, blockers, and relevant code first. Use TDD where practical. Run the issue test plan and relevant checks. Do not expand into other issues."
   }
   "review" {
     $issue = Resolve-Issue $root $issuesDir $Rest[0]
     $rel = Resolve-Path -Relative $issue
-    codex --ask-for-approval never exec -C $root --sandbox read-only "Use review-work. Review current uncommitted changes against $rel. Do not modify files. Findings first. Do not paste the full diff."
+    codex --ask-for-approval never exec -C $root --sandbox $sandbox "Use review-work. Review current uncommitted changes against $rel. Do not modify files. Findings first. Do not paste the full diff."
   }
   "hitl" {
     $issue = Resolve-Issue $root $issuesDir $Rest[0]
     $rel = Resolve-Path -Relative $issue
-    codex -C $root --sandbox workspace-write "Resolve this HITL issue: $rel. Ask decisions one at a time with recommended defaults. Do not edit app code. Once I approve, update the issue decision table and set status to done."
+    codex -C $root --sandbox $sandbox "Resolve this HITL issue: $rel. Ask decisions one at a time with recommended defaults. Do not edit app code. Once I approve, update the issue decision table and set status to done."
   }
   default { throw "Unknown command: $Command" }
 }

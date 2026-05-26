@@ -67,6 +67,7 @@ From a terminal in the project:
 ```bash
 aiwf status
 aiwf next
+aiwf afk
 ```
 
 Or inspect the `issues/` folder manually.
@@ -80,7 +81,45 @@ Issue meanings:
 - `status: review`: implemented but not accepted.
 - `status: done`: review and QA passed.
 
-## 5. Resolve HITL Issues
+## 5. Run AFK Overnight
+
+Use this only after the board has clear `AFK` issues with acceptance criteria and test plans.
+
+```bash
+aiwf afk
+```
+
+`aiwf afk` repeatedly picks the next unblocked `todo` + `AFK` issue, launches Codex with `run-afk-loop` and `implement-issue-tdd`, then refreshes the board before selecting the next issue.
+
+On Windows, the helper defaults Codex to `danger-full-access` because the Codex CLI Windows sandbox can fail before commands start with `CreateProcessAsUserW failed: 5`. On macOS/Linux, the helper defaults to `workspace-write`.
+
+Override the sandbox if needed:
+
+```powershell
+$env:CODEX_FLOW_SANDBOX = "workspace-write"
+aiwf afk
+```
+
+Valid values are `read-only`, `workspace-write`, and `danger-full-access`.
+
+It stops when:
+
+- No unblocked `AFK` issues remain.
+- The next ready issue is `HITL`.
+- Codex exits with a failure.
+- An issue stays `todo` after Codex returns.
+
+Before leaving it overnight, make sure review issues that should unblock later work are either accepted and marked `done`, or intentionally left in `review` to keep dependent work blocked.
+
+If you want a deeper implementation-only night run, let AFK treat `review` blockers as complete:
+
+```powershell
+aiwf afk --through-review
+```
+
+Use this when you plan to review the full stack later. It still skips issues whose own status is `review` or `done`, and it still stops at `HITL` issues.
+
+## 6. Resolve HITL Issues
 
 When an issue is `HITL`, do not let the agent guess.
 
@@ -91,7 +130,7 @@ issues/003-example.md
 Ask me the decisions one at a time. For each decision, give your recommended default and tradeoff. Once I approve, update the issue with the decision table and set status to done.
 ```
 
-## 6. Implement One Issue
+## 7. Implement One Issue
 
 Pick one unblocked AFK issue.
 
@@ -106,7 +145,7 @@ Do not expand into other issues.
 Keep the issue in review when implementation is complete.
 ```
 
-## 7. Review In A Fresh Context
+## 8. Review In A Fresh Context
 
 Use a new Codex thread/session.
 
@@ -128,7 +167,7 @@ Severity rule:
 - `P2`: usually fix before done unless explicitly accepted.
 - `P3`: can become a follow-up issue.
 
-## 8. Fix Findings
+## 9. Fix Findings
 
 Send the review findings back to the implementation thread:
 
@@ -158,7 +197,7 @@ implement fix
 
 Stop when there are no blocking findings.
 
-## 9. Manual QA
+## 10. Manual QA
 
 For user-facing work:
 
@@ -172,7 +211,7 @@ Capture any failures as follow-up issues.
 
 Manual QA is where human taste, UX, product fit, and “does this feel right?” come back into the process.
 
-## 10. Mark Done
+## 11. Mark Done
 
 When review and QA pass:
 
@@ -186,11 +225,12 @@ Update issues/001-example.md:
 
 Then pick the next unblocked issue.
 
-## 11. Continue The Board
+## 12. Continue The Board
 
 ```bash
 aiwf status
 aiwf next
+aiwf afk
 ```
 
 If the next item is AFK, implement it.
@@ -216,6 +256,7 @@ Use terminal for:
 - setup
 - `aiwf status`
 - `aiwf next`
+- `aiwf afk`
 - package tests and checks
 
 The GUI is the cockpit. The terminal is the dashboard.
