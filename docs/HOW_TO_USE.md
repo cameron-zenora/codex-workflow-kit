@@ -111,13 +111,15 @@ It stops when:
 
 Before leaving it overnight, make sure review issues that should unblock later work are either accepted and marked `done`, or intentionally left in `review` to keep dependent work blocked.
 
-If you want a deeper implementation-only night run, let AFK treat `review` blockers as complete:
+If you want a deeper night run, let AFK review each completed slice before continuing:
 
 ```powershell
-aiwf afk --through-review
+aiwf afk --review-between --through-review
 ```
 
-Use this when you plan to review the full stack later. It still skips issues whose own status is `review` or `done`, and it still stops at `HITL` issues.
+This runs implementation and review in separate fresh Codex contexts. Review notes are written under `reviews/` with a `blocking_findings` count. `--through-review` only treats a `review` blocker as chainable when its review note says `blocking_findings: 0`.
+
+Use this when you plan to do final human QA later. It still skips issues whose own status is `done`, and it still stops at `HITL` issues or blocking review findings.
 
 ## 6. Resolve HITL Issues
 

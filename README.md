@@ -121,8 +121,10 @@ This repeatedly launches Codex on the next unblocked `todo` + `AFK` issue and st
 
 On Windows, `aiwf` defaults these Codex runs to `danger-full-access` to avoid Windows sandbox launch failures. Set `CODEX_FLOW_SANDBOX` to override that behavior.
 
-For a deeper implementation-only run that treats `review` blockers as complete, use:
+For a deeper run that reviews each completed slice before continuing, use:
 
 ```powershell
-aiwf afk --through-review
+aiwf afk --review-between --through-review
 ```
+
+That mode writes fresh-context review notes under `reviews/` and only chains through `review` blockers when the review note reports `blocking_findings: 0`.

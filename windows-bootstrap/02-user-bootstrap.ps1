@@ -164,11 +164,22 @@ function Test-IssueDone($IssuesDir, $Id) {
   return $issue -and (Get-IssueField $issue.FullName "status") -eq "done"
 }
 
+function Get-ReviewPath($Root, $Id) {
+  return (Join-Path (Join-Path $Root "reviews") "$Id-review.md")
+}
+
+function Test-ReviewPassed($Root, $Id) {
+  $reviewPath = Get-ReviewPath $Root $Id
+  if (-not (Test-Path $reviewPath)) { return $false }
+  $blocking = Get-IssueField $reviewPath "blocking_findings"
+  return $blocking -eq "0"
+}
+
 function Test-IssueCompleteForBlocker($IssuesDir, $Id, [bool]$AllowReviewBlockers = $false) {
   $issue = Get-IssueById $IssuesDir $Id
   if (-not $issue) { return $false }
   $status = Get-IssueField $issue.FullName "status"
-  return $status -eq "done" -or ($AllowReviewBlockers -and $status -eq "review")
+  return $status -eq "done" -or ($AllowReviewBlockers -and $status -eq "review" -and (Test-ReviewPassed $root $Id))
 }
 
 function Test-Unblocked($IssuesDir, $Path, [bool]$AllowReviewBlockers = $false) {
@@ -186,6 +197,31 @@ function Get-NextAfkIssue($IssuesDir, [bool]$AllowReviewBlockers = $false) {
   } | Select-Object -First 1
 }
 
+function Get-NextReviewIssue($Root, $IssuesDir, [bool]$AllowReviewBlockers = $false) {
+  Get-ChildItem $IssuesDir -Filter "*.md" -ErrorAction SilentlyContinue | Sort-Object Name | Where-Object {
+    $id = Get-IssueField $_.FullName "id"
+    (Get-IssueField $_.FullName "status") -eq "review" -and
+    (Get-IssueField $_.FullName "type") -eq "AFK" -and
+    -not (Test-ReviewPassed $Root $id) -and
+    (Test-Unblocked $IssuesDir $_.FullName $AllowReviewBlockers)
+  } | Select-Object -First 1
+}
+
+function Invoke-CodexReview($Root, $IssuePath, $Sandbox) {
+  New-Item -ItemType Directory -Path (Join-Path $Root "reviews") -Force | Out-Null
+  $id = Get-IssueField $IssuePath "id"
+  $rel = Resolve-Path -Relative $IssuePath
+  $reviewPath = Get-ReviewPath $Root $id
+  $reviewRel = Resolve-Path -Relative (Split-Path -Parent $reviewPath)
+  $reviewRel = Join-Path $reviewRel (Split-Path -Leaf $reviewPath)
+
+  Write-Host "Reviewing $rel -> $reviewRel" -ForegroundColor Cyan
+  codex --ask-for-approval never exec -C $Root --sandbox $Sandbox "Use review-work. Review the current uncommitted changes against $rel in a fresh context. Do not modify implementation files or issue files. You may only create or replace the review note at $reviewRel. Write the review note with YAML-style metadata at the top containing issue: $id, result: pass or needs-fix, and blocking_findings: the count of P0/P1/P2 findings. Use blocking_findings: 0 only when there are no P0/P1/P2 findings. Findings first, ordered by severity. Include tests run or not run. Do not paste the full diff."
+  if ($LASTEXITCODE -ne 0) {
+    throw "Codex review exited with code $LASTEXITCODE while reviewing $rel"
+  }
+}
+
 $root = Get-Root
 $issuesDir = if ($env:CODEX_FLOW_ISSUES_DIR) { $env:CODEX_FLOW_ISSUES_DIR } else { Join-Path $root "issues" }
 $sandbox = if ($env:CODEX_FLOW_SANDBOX) { $env:CODEX_FLOW_SANDBOX } else { "danger-full-access" }
@@ -200,6 +236,7 @@ aiwf.ps1 commands:
   aiwf.ps1 next --through-review
   aiwf.ps1 afk
   aiwf.ps1 afk --through-review
+  aiwf.ps1 afk --review-between --through-review
   aiwf.ps1 implement ISSUE-001
   aiwf.ps1 review ISSUE-001
   aiwf.ps1 hitl ISSUE-003
@@ -229,11 +266,27 @@ aiwf.ps1 commands:
   "afk" {
     $completed = 0
     $allowReviewBlockers = $Rest -contains "--through-review"
+    $reviewBetween = $Rest -contains "--review-between"
     Write-Host "Using Codex sandbox: $sandbox" -ForegroundColor Yellow
     if ($allowReviewBlockers) {
-      Write-Host "Treating review blockers as complete for AFK implementation chaining." -ForegroundColor Yellow
+      Write-Host "Treating review blockers with passing review notes as complete for AFK implementation chaining." -ForegroundColor Yellow
+    }
+    if ($reviewBetween) {
+      Write-Host "Running fresh review-work between AFK implementation steps." -ForegroundColor Yellow
     }
     while ($true) {
+      if ($reviewBetween) {
+        $reviewIssue = Get-NextReviewIssue $root $issuesDir $allowReviewBlockers
+        if ($reviewIssue) {
+          $reviewId = Get-IssueField $reviewIssue.FullName "id"
+          Invoke-CodexReview $root $reviewIssue.FullName $sandbox
+          if (-not (Test-ReviewPassed $root $reviewId)) {
+            throw "Review for $reviewId found blocking findings or did not write blocking_findings: 0; stopping for fixes."
+          }
+          continue
+        }
+      }
+
       $next = Get-NextAfkIssue $issuesDir $allowReviewBlockers
       if (-not $next) {
         "NO_MORE_AFK_TASKS"
@@ -253,6 +306,14 @@ aiwf.ps1 commands:
         throw "Issue $rel is still todo and unblocked after Codex returned; stopping to avoid repeating it."
       }
 
+      if ($reviewBetween -and $statusAfter -eq "review") {
+        $issueId = Get-IssueField $next.FullName "id"
+        Invoke-CodexReview $root $next.FullName $sandbox
+        if (-not (Test-ReviewPassed $root $issueId)) {
+          throw "Review for $issueId found blocking findings or did not write blocking_findings: 0; stopping for fixes."
+        }
+      }
+
       $completed += 1
     }
   }
@@ -263,8 +324,7 @@ aiwf.ps1 commands:
   }
   "review" {
     $issue = Resolve-Issue $root $issuesDir $Rest[0]
-    $rel = Resolve-Path -Relative $issue
-    codex --ask-for-approval never exec -C $root --sandbox $sandbox "Use review-work. Review current uncommitted changes against $rel. Do not modify files. Findings first. Do not paste the full diff."
+    Invoke-CodexReview $root $issue $sandbox
   }
   "hitl" {
     $issue = Resolve-Issue $root $issuesDir $Rest[0]

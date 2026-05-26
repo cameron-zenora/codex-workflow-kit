@@ -239,13 +239,27 @@ issue_done() {
   [ -n "$file" ] && [ "$(issue_field "$file" status)" = "done" ]
 }
 
+review_path() {
+  local id="$1"
+  echo "$ROOT/reviews/$id-review.md"
+}
+
+review_passed() {
+  local id="$1"
+  local file blocking
+  file="$(review_path "$id")"
+  [ -f "$file" ] || return 1
+  blocking="$(issue_field "$file" blocking_findings)"
+  [ "$blocking" = "0" ]
+}
+
 issue_complete_for_blocker() {
   local id="$1"
   local file status
   file="$(issue_by_id "$id" || true)"
   [ -n "$file" ] || return 1
   status="$(issue_field "$file" status)"
-  [ "$status" = "done" ] || { [ "$ALLOW_REVIEW_BLOCKERS" -eq 1 ] && [ "$status" = "review" ]; }
+  [ "$status" = "done" ] || { [ "$ALLOW_REVIEW_BLOCKERS" -eq 1 ] && [ "$status" = "review" ] && review_passed "$id"; }
 }
 
 issue_unblocked() {
@@ -283,6 +297,36 @@ next_afk_issue() {
   return 1
 }
 
+next_review_issue() {
+  local file id
+  [ -d "$ISSUES_DIR" ] || return 1
+  for file in "$ISSUES_DIR"/*.md; do
+    [ -e "$file" ] || continue
+    id="$(issue_field "$file" id)"
+    if [ "$(issue_field "$file" status)" = "review" ] && \
+       [ "$(issue_field "$file" type)" = "AFK" ] && \
+       ! review_passed "$id" && \
+       issue_unblocked "$file"; then
+      echo "$file"
+      return 0
+    fi
+  done
+  return 1
+}
+
+codex_review_issue() {
+  local file="$1"
+  local id review
+  mkdir -p "$ROOT/reviews"
+  id="$(issue_field "$file" id)"
+  review="$(review_path "$id")"
+  echo "Reviewing $file -> $review"
+  if ! codex --ask-for-approval never exec -C "$ROOT" --sandbox "$SANDBOX" "Use review-work. Review the current uncommitted changes against $file in a fresh context. Do not modify implementation files or issue files. You may only create or replace the review note at $review. Write the review note with YAML-style metadata at the top containing issue: $id, result: pass or needs-fix, and blocking_findings: the count of P0/P1/P2 findings. Use blocking_findings: 0 only when there are no P0/P1/P2 findings. Findings first, ordered by severity. Include tests run or not run. Do not paste the full diff."; then
+    echo "Codex review failed while reviewing $file" >&2
+    exit 1
+  fi
+}
+
 case "$subcommand" in
   help|-h|--help)
     cat <<HELP
@@ -294,6 +338,7 @@ aiwf commands:
   aiwf next --through-review
   aiwf afk
   aiwf afk --through-review
+  aiwf afk --review-between --through-review
 HELP
     ;;
   init)
@@ -334,16 +379,35 @@ HELP
     ;;
   afk)
     completed=0
+    review_between=0
     for arg in "$@"; do
       if [ "$arg" = "--through-review" ]; then
         ALLOW_REVIEW_BLOCKERS=1
+      elif [ "$arg" = "--review-between" ]; then
+        review_between=1
       fi
     done
     echo "Using Codex sandbox: $SANDBOX"
     if [ "$ALLOW_REVIEW_BLOCKERS" -eq 1 ]; then
-      echo "Treating review blockers as complete for AFK implementation chaining."
+      echo "Treating review blockers with passing review notes as complete for AFK implementation chaining."
+    fi
+    if [ "$review_between" -eq 1 ]; then
+      echo "Running fresh review-work between AFK implementation steps."
     fi
     while true; do
+      if [ "$review_between" -eq 1 ]; then
+        review_issue="$(next_review_issue || true)"
+        if [ -n "$review_issue" ]; then
+          review_id="$(issue_field "$review_issue" id)"
+          codex_review_issue "$review_issue"
+          if ! review_passed "$review_id"; then
+            echo "Review for $review_id found blocking findings or did not write blocking_findings: 0; stopping for fixes." >&2
+            exit 1
+          fi
+          continue
+        fi
+      fi
+
       next="$(next_afk_issue || true)"
       if [ -z "$next" ]; then
         echo "NO_MORE_AFK_TASKS"
@@ -361,6 +425,15 @@ HELP
       if [ "$status_after" = "todo" ] && issue_unblocked "$next"; then
         echo "Issue $next is still todo and unblocked after Codex returned; stopping to avoid repeating it." >&2
         exit 1
+      fi
+
+      if [ "$review_between" -eq 1 ] && [ "$status_after" = "review" ]; then
+        issue_id="$(issue_field "$next" id)"
+        codex_review_issue "$next"
+        if ! review_passed "$issue_id"; then
+          echo "Review for $issue_id found blocking findings or did not write blocking_findings: 0; stopping for fixes." >&2
+          exit 1
+        fi
       fi
 
       completed=$((completed + 1))
