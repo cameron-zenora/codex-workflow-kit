@@ -82,6 +82,12 @@ npm run lint
 
 ## Daily Workflow
 
+For the full guide, read:
+
+```powershell
+code ..\docs\HOW_TO_USE.md
+```
+
 Use the Codex GUI for the real work:
 
 ```text

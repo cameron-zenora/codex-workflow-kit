@@ -34,6 +34,24 @@ This copies `skills/*` into your Codex skills folder:
 - Windows: `%USERPROFILE%\.codex\skills`
 - macOS/Linux: `~/.codex/skills`
 
+## How To Use It
+
+Read [docs/HOW_TO_USE.md](docs/HOW_TO_USE.md).
+
+Short version:
+
+```text
+grill-me
+-> write-prd
+-> break-prd-to-issues
+-> implement one issue
+-> review in fresh context
+-> fix findings
+-> review again
+-> QA
+-> done
+```
+
 ## Update Skills Later
 
 Pull the latest repo, then rerun the installer:
