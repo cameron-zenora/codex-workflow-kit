@@ -131,6 +131,23 @@ function Get-IssueField($Path, $Field) {
   return $line.Substring($Field.Length + 2)
 }
 
+function Set-IssueField($Path, $Field, $Value) {
+  $lines = [System.Collections.Generic.List[string]](Get-Content -Path $Path)
+  $pattern = "^$([Regex]::Escape($Field)): "
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($lines[$i] -match $pattern) {
+      $nextLine = "${Field}: $Value"
+      if ($lines[$i] -ne $nextLine) {
+        $lines[$i] = $nextLine
+        Set-Content -Path $Path -Value $lines -Encoding utf8
+      }
+      return
+    }
+    if ($i -gt 0 -and $lines[$i] -eq "---") { break }
+  }
+  throw "Could not find issue field '$Field' in $Path"
+}
+
 function Get-IssueById($IssuesDir, $Id) {
   Get-ChildItem $IssuesDir -Filter "*.md" -ErrorAction SilentlyContinue |
     Where-Object { (Get-IssueField $_.FullName "id") -eq $Id } |
@@ -173,6 +190,26 @@ function Test-ReviewPassed($Root, $Id) {
   if (-not (Test-Path $reviewPath)) { return $false }
   $blocking = Get-IssueField $reviewPath "blocking_findings"
   return $blocking -eq "0"
+}
+
+function Mark-IssueDoneAfterPassingReview($Root, $IssuePath) {
+  $id = Get-IssueField $IssuePath "id"
+  if (-not (Test-ReviewPassed $Root $id)) { return $false }
+  $status = Get-IssueField $IssuePath "status"
+  if ($status -eq "review") {
+    Set-IssueField $IssuePath "status" "done"
+    Write-Host "Marked $id done after passing review." -ForegroundColor Green
+  }
+  return $true
+}
+
+function Mark-PassedReviewIssuesDone($Root, $IssuesDir) {
+  Get-ChildItem $IssuesDir -Filter "*.md" -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
+    $id = Get-IssueField $_.FullName "id"
+    if ((Get-IssueField $_.FullName "status") -eq "review" -and (Test-ReviewPassed $Root $id)) {
+      $null = Mark-IssueDoneAfterPassingReview $Root $_.FullName
+    }
+  }
 }
 
 function Test-IssueCompleteForBlocker($IssuesDir, $Id, [bool]$AllowReviewBlockers = $false) {
@@ -361,6 +398,8 @@ Env:
       Write-Host "Codex exec timeout disabled." -ForegroundColor Yellow
     }
     while ($true) {
+      Mark-PassedReviewIssuesDone $root $issuesDir
+
       if ($reviewBetween) {
         $reviewIssue = Get-NextReviewIssue $root $issuesDir $allowReviewBlockers
         if ($reviewIssue) {
@@ -374,6 +413,7 @@ Env:
             }
             throw "Review for $reviewId found blocking findings or did not write blocking_findings: 0; stopping for fixes."
           }
+          $null = Mark-IssueDoneAfterPassingReview $root $reviewIssue.FullName
           continue
         }
       }
@@ -409,6 +449,7 @@ Env:
           }
           throw "Review for $issueId found blocking findings or did not write blocking_findings: 0; stopping for fixes."
         }
+        $null = Mark-IssueDoneAfterPassingReview $root $next.FullName
       }
 
       $completed += 1
@@ -427,6 +468,7 @@ Env:
     if (-not (Invoke-CodexReview $root $issue $sandbox)) {
       throw "Codex timed out while reviewing $issue"
     }
+    $null = Mark-IssueDoneAfterPassingReview $root $issue
   }
   "hitl" {
     $issue = Resolve-Issue $root $issuesDir $Rest[0]

@@ -255,6 +255,29 @@ issue_field() {
   awk -F': ' -v field="$field" '$0 ~ "^" field ": " { print $2; exit }' "$file"
 }
 
+set_issue_field() {
+  local file="$1"
+  local field="$2"
+  local value="$3"
+  local tmp
+  tmp="$(mktemp)"
+  if ! awk -v field="$field" -v value="$value" '
+    BEGIN { changed = 0 }
+    !changed && $0 ~ "^" field ": " {
+      print field ": " value
+      changed = 1
+      next
+    }
+    { print }
+    END { if (!changed) exit 42 }
+  ' "$file" > "$tmp"; then
+    rm -f "$tmp"
+    echo "Could not find issue field '$field' in $file" >&2
+    exit 1
+  fi
+  mv "$tmp" "$file"
+}
+
 issue_by_id() {
   local id="$1"
   local file
@@ -287,6 +310,33 @@ review_passed() {
   [ -f "$file" ] || return 1
   blocking="$(issue_field "$file" blocking_findings)"
   [ "$blocking" = "0" ]
+}
+
+mark_issue_done_after_passing_review() {
+  local file="$1"
+  local id status
+  id="$(issue_field "$file" id)"
+  if ! review_passed "$id"; then
+    return 1
+  fi
+  status="$(issue_field "$file" status)"
+  if [ "$status" = "review" ]; then
+    set_issue_field "$file" status done
+    echo "Marked $id done after passing review."
+  fi
+  return 0
+}
+
+mark_passed_review_issues_done() {
+  local file id
+  [ -d "$ISSUES_DIR" ] || return 0
+  for file in "$ISSUES_DIR"/*.md; do
+    [ -e "$file" ] || continue
+    id="$(issue_field "$file" id)"
+    if [ "$(issue_field "$file" status)" = "review" ] && review_passed "$id"; then
+      mark_issue_done_after_passing_review "$file" >/dev/null
+    fi
+  done
 }
 
 issue_complete_for_blocker() {
@@ -474,6 +524,8 @@ HELP
       echo "Codex exec timeout: ${CODEX_FLOW_EXEC_TIMEOUT_SECONDS:-5400} second(s)."
     fi
     while true; do
+      mark_passed_review_issues_done
+
       if [ "$review_between" -eq 1 ]; then
         review_issue="$(next_review_issue || true)"
         if [ -n "$review_issue" ]; then
@@ -502,6 +554,7 @@ HELP
             echo "Review for $review_id found blocking findings or did not write blocking_findings: 0; stopping for fixes." >&2
             exit 1
           fi
+          mark_issue_done_after_passing_review "$review_issue" >/dev/null
           continue
         fi
       fi
@@ -560,6 +613,7 @@ HELP
           echo "Review for $issue_id found blocking findings or did not write blocking_findings: 0; stopping for fixes." >&2
           exit 1
         fi
+        mark_issue_done_after_passing_review "$next" >/dev/null
       fi
 
       completed=$((completed + 1))

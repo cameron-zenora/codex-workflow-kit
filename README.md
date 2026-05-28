@@ -127,7 +127,7 @@ For a deeper run that reviews each completed slice before continuing, use:
 aiwf afk --review-between --through-review
 ```
 
-That mode writes fresh-context review notes under `reviews/` and only chains through `review` blockers when the review note reports `blocking_findings: 0`.
+That mode writes fresh-context review notes under `reviews/` and marks a `review` issue `done` when the review note reports `blocking_findings: 0`. `--through-review` still lets older passed review notes count as complete while the loop sweeps them to `done`.
 
 For an all-night run that also fixes blocking review findings, use:
 
